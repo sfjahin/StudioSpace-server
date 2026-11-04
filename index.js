@@ -153,6 +153,47 @@ app.get('/studios/:id', async (req, res) => {
   }
 })
 
+/**
+ * Update an existing studio (PUT / PATCH /studios/:id).
+ * Host info is read-only: whatever host the document already has is kept.
+ */
+async function updateStudio(req, res) {
+  const { id } = req.params
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(404).json({ message: 'Studio not found.' })
+  }
+
+  const { fields, value } = validateStudio(req.body)
+
+  if (Object.keys(fields).length > 0) {
+    return res.status(400).json({
+      message: 'Some fields need attention.',
+      fields,
+    })
+  }
+
+  // Strip host fields so a client can never reassign the listing's host.
+  const { hostName: _hostName, hostEmail: _hostEmail, ...editable } = value
+
+  try {
+    const doc = await studios().findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { ...editable, updatedAt: new Date() } },
+      { returnDocument: 'after' }
+    )
+
+    if (!doc) return res.status(404).json({ message: 'Studio not found.' })
+    return res.json(toClient(doc))
+  } catch (err) {
+    console.error('Failed to update studio:', err)
+    return res.status(500).json({ message: "We couldn't save your changes. Please try again." })
+  }
+}
+
+app.put('/studios/:id', updateStudio)
+app.patch('/studios/:id', updateStudio)
+
 app.get('/', (_req, res) => {
   res.send({ message: 'Server is running!' })
 })
