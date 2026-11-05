@@ -194,6 +194,28 @@ async function updateStudio(req, res) {
 app.put('/studios/:id', updateStudio)
 app.patch('/studios/:id', updateStudio)
 
+/** Delete a listing permanently. */
+app.delete('/studios/:id', async (req, res) => {
+  const { id } = req.params
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(404).json({ message: 'Studio not found.' })
+  }
+
+  try {
+    const result = await studios().deleteOne({ _id: new ObjectId(id) })
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'Studio not found.' })
+    }
+
+    return res.json({ id, deleted: true })
+  } catch (err) {
+    console.error('Failed to delete studio:', err)
+    return res.status(500).json({ message: "We couldn't delete that studio. Please try again." })
+  }
+})
+
 app.get('/', (_req, res) => {
   res.send({ message: 'Server is running!' })
 })
