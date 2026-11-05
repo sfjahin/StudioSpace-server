@@ -7,6 +7,7 @@ const app = express()
 const PORT = process.env.PORT ?? 8000
 const DB_NAME = process.env.MONGODB_DB ?? 'studiospace'
 const COLLECTION = 'studios'
+const BOOKINGS = 'bookings'
 
 const CATEGORIES = new Set([
   'Photo Studio',
@@ -32,6 +33,10 @@ export async function connectToMongoDB() {
 
 function studios() {
   return client.db(DB_NAME).collection(COLLECTION)
+}
+
+function bookings() {
+  return client.db(DB_NAME).collection(BOOKINGS)
 }
 
 /**
@@ -95,15 +100,25 @@ function validateStudio(body = {}) {
       imageUrl,
       amenities,
       overview,
-      hostName: str(body.hostName),
-      hostEmail: str(body.hostEmail),
+      ownerName: str(body.ownerName ?? body.hostName),
+      ownerEmail: str(body.ownerEmail ?? body.hostEmail),
     },
   }
 }
 
 function toClient(doc) {
-  const { _id, ...rest } = doc
-  return { id: _id.toString(), ...rest }
+  const { _id, hostName, hostEmail, ...rest } = doc
+  const out = { id: _id.toString(), ...rest }
+  // Listings created before the rename stored the owner as hostName / hostEmail.
+  if (!out.ownerName && hostName) out.ownerName = hostName
+  if (!out.ownerEmail && hostEmail) out.ownerEmail = hostEmail
+  return out
+}
+
+/** Case-insensitive exact-match regex for an email address. */
+function emailMatcher(email) {
+  const escaped = String(email).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp('^' + escaped + '$', 'i')
 }
 
 app.post('/add-studio', async (req, res) => {
@@ -126,9 +141,14 @@ app.post('/add-studio', async (req, res) => {
   }
 })
 
-app.get('/studios', async (_req, res) => {
+app.get('/studios', async (req, res) => {
   try {
-    const docs = await studios().find().sort({ createdAt: -1 }).toArray()
+    // Optional ?ownerEmail= filter powers the "My Listings" page.
+    const ownerEmail = typeof req.query.ownerEmail === 'string' ? req.query.ownerEmail.trim() : ''
+    const filter = ownerEmail
+      ? { $or: [{ ownerEmail: emailMatcher(ownerEmail) }, { hostEmail: emailMatcher(ownerEmail) }] }
+      : {}
+    const docs = await studios().find(filter).sort({ createdAt: -1 }).toArray()
     return res.json({ studios: docs.map(toClient) })
   } catch (err) {
     console.error('Failed to list studios:', err)
@@ -155,7 +175,7 @@ app.get('/studios/:id', async (req, res) => {
 
 /**
  * Update an existing studio (PUT / PATCH /studios/:id).
- * Host info is read-only: whatever host the document already has is kept.
+ * Owner info is read-only: whatever owner the document already has is kept.
  */
 async function updateStudio(req, res) {
   const { id } = req.params
@@ -173,8 +193,8 @@ async function updateStudio(req, res) {
     })
   }
 
-  // Strip host fields so a client can never reassign the listing's host.
-  const { hostName: _hostName, hostEmail: _hostEmail, ...editable } = value
+  // Strip owner fields so a client can never reassign the listing's owner.
+  const { ownerName: _ownerName, ownerEmail: _ownerEmail, ...editable } = value
 
   try {
     const doc = await studios().findOneAndUpdate(
@@ -213,6 +233,170 @@ app.delete('/studios/:id', async (req, res) => {
   } catch (err) {
     console.error('Failed to delete studio:', err)
     return res.status(500).json({ message: "We couldn't delete that studio. Please try again." })
+  }
+})
+
+/* -------------------------------------------------------------------------- */
+/*                                  Bookings                                  */
+/* -------------------------------------------------------------------------- */
+
+const SERVICE_FEE_RATE = 0.1 // keep in sync with the client (src/lib/api.ts)
+const MIN_HOURS = 2 // same 2-hour minimum the booking card bills for
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const TIME_RE = /^(0[1-9]|1[0-2]):[0-5]\d (AM|PM)$/
+const round2 = (n) => Math.round(n * 100) / 100
+
+/** "02:00 PM" -> minutes since midnight. */
+function toMinutes(time) {
+  const [hm, period] = time.split(' ')
+  const [h, m] = hm.split(':').map(Number)
+  const hour24 = period === 'PM' && h !== 12 ? h + 12 : period === 'AM' && h === 12 ? 0 : h
+  return hour24 * 60 + m
+}
+
+/**
+ * Validate a booking request against the studio it targets.
+ * Prices are always recomputed here from the studio's hourly rate, never trusted from the client.
+ */
+function validateBooking(body = {}, studio) {
+  const fields = {}
+  const str = (v) => (typeof v === 'string' ? v.trim() : '')
+
+  const userName = str(body.userName)
+  const userEmail = str(body.userEmail).toLowerCase()
+  const date = str(body.date)
+  const startTime = str(body.startTime)
+  const endTime = str(body.endTime)
+  const note = str(body.note)
+  const crewSize = Number(body.crewSize)
+
+  if (!userName) fields.userName = 'Tell the host who is booking.'
+  if (!EMAIL_RE.test(userEmail)) fields.userEmail = 'Enter a valid email address.'
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date))) {
+    fields.date = 'Pick a date for your session.'
+  }
+
+  let hours = 0
+  if (!TIME_RE.test(startTime) || !TIME_RE.test(endTime)) {
+    fields.startTime = 'Choose a start and end time.'
+  } else {
+    const raw = (toMinutes(endTime) - toMinutes(startTime)) / 60
+    if (raw <= 0) fields.endTime = 'End time must be after the start time.'
+    hours = Math.max(raw, MIN_HOURS)
+  }
+
+  if (!Number.isInteger(crewSize) || crewSize < 1 || crewSize > studio.maxCapacity) {
+    fields.crewSize = `Crew size must be between 1 and ${studio.maxCapacity}.`
+  }
+
+  if (note.length > 500) fields.note = 'Keep the note under 500 characters.'
+
+  const subtotal = round2(studio.hourlyRate * hours)
+  const serviceFee = round2(subtotal * SERVICE_FEE_RATE)
+
+  return {
+    fields,
+    value: {
+      userName,
+      userEmail,
+      date,
+      startTime,
+      endTime,
+      hours,
+      crewSize,
+      note,
+      hourlyRate: studio.hourlyRate,
+      subtotal,
+      serviceFee,
+      total: round2(subtotal + serviceFee),
+    },
+  }
+}
+
+/** Create a booking. It always starts as "Pending". */
+app.post('/bookings', async (req, res) => {
+  const { studioId } = req.body ?? {}
+
+  if (typeof studioId !== 'string' || !ObjectId.isValid(studioId)) {
+    return res.status(404).json({ message: 'Studio not found.' })
+  }
+
+  try {
+    const studioDoc = await studios().findOne({ _id: new ObjectId(studioId) })
+    if (!studioDoc) return res.status(404).json({ message: 'Studio not found.' })
+    const studio = toClient(studioDoc)
+
+    const { fields, value } = validateBooking(req.body, studio)
+    if (Object.keys(fields).length > 0) {
+      return res.status(400).json({ message: 'Some fields need attention.', fields })
+    }
+
+    const doc = {
+      studioId,
+      studioTitle: studio.title,
+      studioImage: studio.imageUrl,
+      studioAddress: studio.address,
+      studioCategory: studio.category,
+      ownerEmail: studio.ownerEmail ?? '',
+      ...value,
+      status: 'Pending',
+      createdAt: new Date(),
+    }
+    const result = await bookings().insertOne(doc)
+    return res.status(201).json(toClient({ _id: result.insertedId, ...doc }))
+  } catch (err) {
+    console.error('Failed to create booking:', err)
+    return res.status(500).json({ message: "We couldn't save your booking. Please try again." })
+  }
+})
+
+/** List the bookings made by one user: GET /bookings?email=... */
+app.get('/bookings', async (req, res) => {
+  const email = typeof req.query.email === 'string' ? req.query.email.trim() : ''
+  if (!email) return res.status(400).json({ message: 'An email is required.' })
+
+  try {
+    const docs = await bookings()
+      .find({ userEmail: emailMatcher(email) })
+      .sort({ createdAt: -1 })
+      .toArray()
+    return res.json({ bookings: docs.map(toClient) })
+  } catch (err) {
+    console.error('Failed to list bookings:', err)
+    return res.status(500).json({ message: "We couldn't load your bookings. Please try again." })
+  }
+})
+
+/** Cancel a booking. Only the person who booked it can do this, and only while it is Pending. */
+app.patch('/bookings/:id/cancel', async (req, res) => {
+  const { id } = req.params
+  const email = typeof req.body?.userEmail === 'string' ? req.body.userEmail.trim() : ''
+
+  if (!ObjectId.isValid(id)) return res.status(404).json({ message: 'Booking not found.' })
+
+  try {
+    const existing = await bookings().findOne({ _id: new ObjectId(id) })
+    if (!existing) return res.status(404).json({ message: 'Booking not found.' })
+
+    if (!email || existing.userEmail.toLowerCase() !== email.toLowerCase()) {
+      return res.status(403).json({ message: 'You can only cancel your own bookings.' })
+    }
+
+    // The status filter makes this atomic: a booking confirmed a moment ago won't be cancelled.
+    const updated = await bookings().findOneAndUpdate(
+      { _id: existing._id, status: 'Pending' },
+      { $set: { status: 'Cancelled', cancelledAt: new Date() } },
+      { returnDocument: 'after' }
+    )
+    if (!updated) {
+      return res.status(409).json({ message: 'Only pending bookings can be cancelled.' })
+    }
+    return res.json(toClient(updated))
+  } catch (err) {
+    console.error('Failed to cancel booking:', err)
+    return res.status(500).json({ message: "We couldn't cancel that booking. Please try again." })
   }
 })
 
