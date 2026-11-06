@@ -143,6 +143,7 @@ app.post('/add-studio', async (req, res) => {
 
 app.get('/studios', async (req, res) => {
   try {
+<<<<<<< HEAD
     // ?ownerEmail= powers "My Listings"; ?category= and ?limit= power Explore and the home page.
     const ownerEmail = typeof req.query.ownerEmail === 'string' ? req.query.ownerEmail.trim() : ''
     const category = typeof req.query.category === 'string' ? req.query.category.trim() : ''
@@ -157,6 +158,14 @@ app.get('/studios', async (req, res) => {
     let cursor = studios().find(filter).sort({ createdAt: -1 })
     if (limit > 0) cursor = cursor.limit(limit)
     const docs = await cursor.toArray()
+=======
+    // Optional ?ownerEmail= filter powers the "My Listings" page.
+    const ownerEmail = typeof req.query.ownerEmail === 'string' ? req.query.ownerEmail.trim() : ''
+    const filter = ownerEmail
+      ? { $or: [{ ownerEmail: emailMatcher(ownerEmail) }, { hostEmail: emailMatcher(ownerEmail) }] }
+      : {}
+    const docs = await studios().find(filter).sort({ createdAt: -1 }).toArray()
+>>>>>>> 81692daa1ab136f160203395f0b3681d07b162de
     return res.json({ studios: docs.map(toClient) })
   } catch (err) {
     console.error('Failed to list studios:', err)
@@ -323,6 +332,7 @@ function validateBooking(body = {}, studio) {
   }
 }
 
+<<<<<<< HEAD
 /**
  * Challenge 2 — double-booking prevention.
  * Finds a Confirmed booking for the same studio and date whose time range overlaps
@@ -341,6 +351,8 @@ async function findConfirmedOverlap({ studioId, date, startTime, endTime, exclud
 const SLOT_TAKEN = (b) =>
   `This studio is already booked from ${b.startTime} to ${b.endTime} on that date. Please pick a different time.`
 
+=======
+>>>>>>> 81692daa1ab136f160203395f0b3681d07b162de
 /** Create a booking. It always starts as "Pending". */
 app.post('/bookings', async (req, res) => {
   const { studioId } = req.body ?? {}
@@ -359,11 +371,14 @@ app.post('/bookings', async (req, res) => {
       return res.status(400).json({ message: 'Some fields need attention.', fields })
     }
 
+<<<<<<< HEAD
     const clash = await findConfirmedOverlap({ studioId, ...value })
     if (clash) {
       return res.status(409).json({ message: SLOT_TAKEN(clash), fields: { startTime: 'That time slot is taken.' } })
     }
 
+=======
+>>>>>>> 81692daa1ab136f160203395f0b3681d07b162de
     const doc = {
       studioId,
       studioTitle: studio.title,
@@ -383,6 +398,7 @@ app.post('/bookings', async (req, res) => {
   }
 })
 
+<<<<<<< HEAD
 /** List bookings: ?email= (made by a creator) or ?ownerEmail= (received by a host). */
 app.get('/bookings', async (req, res) => {
   const email = typeof req.query.email === 'string' ? req.query.email.trim() : ''
@@ -392,6 +408,18 @@ app.get('/bookings', async (req, res) => {
   try {
     const filter = email ? { userEmail: emailMatcher(email) } : { ownerEmail: emailMatcher(ownerEmail) }
     const docs = await bookings().find(filter).sort({ createdAt: -1 }).toArray()
+=======
+/** List the bookings made by one user: GET /bookings?email=... */
+app.get('/bookings', async (req, res) => {
+  const email = typeof req.query.email === 'string' ? req.query.email.trim() : ''
+  if (!email) return res.status(400).json({ message: 'An email is required.' })
+
+  try {
+    const docs = await bookings()
+      .find({ userEmail: emailMatcher(email) })
+      .sort({ createdAt: -1 })
+      .toArray()
+>>>>>>> 81692daa1ab136f160203395f0b3681d07b162de
     return res.json({ bookings: docs.map(toClient) })
   } catch (err) {
     console.error('Failed to list bookings:', err)
@@ -399,6 +427,7 @@ app.get('/bookings', async (req, res) => {
   }
 })
 
+<<<<<<< HEAD
 /** Host updates a booking: Pending -> Confirmed (collision-checked), Confirmed -> Completed, or Cancelled. */
 app.patch('/bookings/:id/status', async (req, res) => {
   const { id } = req.params
@@ -436,6 +465,8 @@ app.patch('/bookings/:id/status', async (req, res) => {
   }
 })
 
+=======
+>>>>>>> 81692daa1ab136f160203395f0b3681d07b162de
 /** Cancel a booking. Only the person who booked it can do this, and only while it is Pending. */
 app.patch('/bookings/:id/cancel', async (req, res) => {
   const { id } = req.params
